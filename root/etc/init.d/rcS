@@ -1,0 +1,30 @@
+#!/bin/sh
+#
+# rcS		Call all S??* scripts in /etc/rcS.d in
+#		numerical/alphabetical order.
+#
+# Version:	@(#)/etc/init.d/rcS  2.76  19-Apr-1999  miquels@cistron.nl
+#
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:.
+runlevel=S
+prevlevel=N
+umask 022
+export PATH runlevel prevlevel
+
+# Mount the proc and sys filesystems
+mount -t proc proc /proc
+mount -t sysfs none /sys
+
+# Remount root read-write
+mount -n -o remount,rw /
+
+# Clear mtab
+>/etc/mtab
+
+# Configure the loopback interface
+ifconfig lo up 127.0.0.1 
+
+# Add a route through loopback
+route add -net 127.0.0.0 netmask 255.0.0.0 dev lo
+

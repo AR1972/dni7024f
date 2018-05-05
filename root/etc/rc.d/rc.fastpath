@@ -1,0 +1,1523 @@
+#!/bin/sh
+
+# FASTPATH startup script
+
+REVISION_STRING="6.2"
+
+DOWNLOAD_PATH=/mnt/download
+DOWNLOAD_DEV=tmpfs
+DOWNLOAD_FSTYPE=tmpfs
+
+CONFIG_PATH=/mnt/fastpath
+CONFIG_DEV=/dev/mtdblock0
+CONFIG_ERASE_DEV=/dev/mtd0
+
+EXEC_NAME=switchdrvr
+EXEC_PATH=/mnt/application
+EXEC_DEV=tmpfs
+EXEC_FSTYPE=tmpfs
+
+LOG_NAME=log2.bin
+LOG_PATH=$CONFIG_PATH
+
+UPDATE_FILE=UPDATE
+VPD_FILE=fastpath.vpd
+CODE_FILE=image1
+
+NETBOOT_PARMS=netboot_config
+SERBOOT_PARMS=serboot_config
+DEBUG_PARMS=debug_config
+RUN_DIAGNOSTICS=N
+
+#for bootenv
+export ENVDEV=/dev/mtd2
+export ENVLEN=32768
+
+startup_delay()
+{
+sleep 5 
+kill -10 $$
+}
+
+umount_config_fs()
+{
+umount -f $CONFIG_PATH >/dev/null 2>&1
+}
+
+mount_config_fs()
+{
+umount_config_fs
+
+# check to see if the config fs is still mounted
+MOUNTED=`mount | grep fastpath`
+
+if [ "$MOUNTED" != "" ]
+then
+        exec reboot
+fi
+
+echo "Mounting ${CONFIG_DEV} at ${CONFIG_PATH}."
+if ! mount $CONFIG_PATH >/dev/null 2>&1
+then
+        echo "*** Mount failed!"
+fi
+    
+}
+
+umount_app_fs()
+{
+umount $EXEC_PATH >/dev/null 2>&1
+}
+
+mount_app_fs()
+{
+umount_app_fs
+
+echo -n "Mounting $EXEC_DEV at ${EXEC_PATH}..."
+mount $EXEC_PATH >/dev/null 2>&1
+echo "done."
+}
+
+run_mfg_diags()
+{
+cd $EXEC_PATH
+if [ -f $CONFIG_PATH/mfg-diags.tar.gz ]
+then
+        echo "Starting manufacturing diagnostics...."
+        tar xzf $CONFIG_PATH/mfg-diags.tar.gz
+	./mfg-diags.sh
+else
+        echo "Manufacturing diagnostics not present on flash!"
+fi
+}
+
+del_mfg_diags()
+{
+if [ -f $CONFIG_PATH/mfg-diags.tar.gz ]
+then
+        echo "Deleting manufacturing diagnostics cannot be undone."
+	echo -n "Are you sure (Y/N)? "
+	read CHOICE
+	case $CHOICE in
+	    y | Y) rm -f $CONFIG_PATH/mfg-diags.tar.gz
+                   rm -f $CONFIG_PATH/mfg_diags_log.bin
+		   echo "Deleted!"
+		   ;;
+	esac
+
+else
+        echo "Manufacturing diagnostics not present on flash!"
+fi
+}
+
+extract_and_run()
+{
+    cd $EXEC_PATH
+    # Extract the tarball from the .stk file
+    echo -n "Extracting application from .stk file..."
+    extimage -i $1 -o ${EXEC_NAME}.tgz -n 3
+    if [ ! -s ${EXEC_NAME}.tgz ]
+    then
+	echo "Failed!"
+	return 1
+    fi
+    echo  "done."
+
+    echo -n "Loading system LED Heartbeat ....."
+    /etc/rc.d/sysHeartBeat &
+    echo  "done"
+
+    echo -n "Loading FASTPATH..."
+    tar -xzf $EXEC_NAME.tgz
+    rm $EXEC_NAME.tgz
+    if ! load_modules
+    then
+	echo "Failed!"
+	return 1
+    fi
+    cd $EXEC_PATH
+    if [ -s ${EXEC_NAME}.7z ]
+    then
+	if ! 7zDec e ${EXEC_NAME}.7z > /dev/null
+	then
+	    echo "Error decompressing FASTPATH!"
+	    return 1
+	fi
+	rm -f ${EXEC_NAME}.7z
+	chmod a+x ${EXEC_NAME}
+    fi
+    if [ -s ${EXEC_NAME}.gz ]
+    then
+	gunzip ${EXEC_NAME}.gz
+	chmod a+x ${EXEC_NAME}
+    fi
+    if [ ! -s ${EXEC_NAME} ]
+    then
+	echo "Failed!"
+	return 1
+    fi
+
+    echo  "done."
+    
+    cd $CONFIG_PATH
+
+    echo "7       4      1      7" > /proc/sys/kernel/printk
+    trap 1 2 3 15
+    if [ $MALLOC_CHECK_ENABLED = Y ]
+    then
+        export MALLOC_CHECK_=$MALLOC_CHECK_LEVEL
+    fi
+    if [ $GDBSERVER_ENABLED = Y ]
+    then
+        exec gdbserver ${GDBSERVER_TTY} ${EXEC_PATH}/${EXEC_NAME}
+    else
+        if [ $RUN_DIAGNOSTICS = Y ]
+        then
+            ${EXEC_PATH}/${EXEC_NAME} diag
+        else
+            ${EXEC_PATH}/${EXEC_NAME} boot
+        fi
+	sync
+	kill 1
+	sleep 30
+    fi
+    return 0
+}
+
+application_setup()
+{
+if [ -f $CONFIG_PATH/mfg-diags.tar.gz ]
+then
+    if [ -f $CONFIG_PATH/mfg_diags_log.bin ]
+    then
+	get_mfg_diag_mode
+	if [ $? != 0 ]
+	then
+	    run_mfg_diags
+	fi
+    fi
+fi
+
+cd $CONFIG_PATH
+CODE_FILE_ENV=$(bootenv -d active)
+CODE_FILE=image1
+if [ "x$CODE_FILE_ENV" = "ximage1" -o "x$CODE_FILE_ENV" = "ximage2" ]
+then
+        if [ -e $CODE_FILE_ENV ]
+        then
+          CODE_FILE=$CODE_FILE_ENV
+        else
+             if [ $CODE_FILE_ENV = "image1" ]
+             then
+               CODE_FILE=image2
+             fi
+          echo "code file $CODE_FILE_ENV not present."
+          echo "booting $CODE_FILE "
+	  bootenv -s active ${CODE_FILE}
+        fi
+else
+        if [ ! -e image1 ]
+        then
+          CODE_FILE=image2
+	  bootenv -s active ${CODE_FILE}
+        fi
+        echo "Booting $CODE_FILE"
+fi
+
+
+if [ $NETBOOT_ENABLED = Y -o $SERBOOT_ENABLED = Y ]
+then
+	prepare_download
+fi
+
+if [ $NETBOOT_ENABLED = Y ]
+then
+	echo -n "Bringing up eth0 interface..."
+	ifconfig eth0 $NETBOOT_HOST_IP netmask $NETBOOT_HOST_NETMASK up
+	echo "done."
+	if [ "$NETBOOT_GATEWAY_IP" ]
+	then
+	echo -n "Adding default gateway $NETBOOT_GATEWAY_IP to the Routing Table..." 
+	route add default gw $NETBOOT_GATEWAY_IP eth0
+	echo "done."
+	fi
+
+	tftp -g -r $NETBOOT_FILENAME -l ${DOWNLOAD_PATH}/${CODE_FILE} $NETBOOT_SERVER_IP >/dev/null 2>&1
+
+	echo -n "Bringing down eth0 interface..."
+	ifconfig eth0 0.0.0.0 down
+	echo "done."
+fi
+
+if [ $SERBOOT_ENABLED = Y ]
+then
+	if [ $SERBOOT_XFER_MODE = X -o $SERBOOT_XFER_MODE = x ]
+	then
+		SERBOOT_FILENAME=tmpfile
+	fi
+
+	cd $DOWNLOAD_PATH
+	
+	case $SERBOOT_XFER_MODE in
+	x | X)	echo "Ready to receive file via XMODEM"
+		echo "Please start XMODEM sender before the receiver times out"
+		rx ${SERBOOT_FILENAME}
+		;;
+
+	y | Y)	echo "Ready to receive file via YMODEM"
+		echo "Please start YMODEM sender before the receiver times out"
+		rb
+		SERBOOT_FILENAME=`ls`
+		;;
+
+	z | Z)	echo "Ready to receive file via ZMODEM"
+		echo "Please start ZMODEM sender before the receiver times out"
+		rz
+		SERBOOT_FILENAME=`ls`
+		;;
+		
+	*)	echo "Invalid mode selected!" 
+		cd -
+		return
+		;;
+	esac                   
+
+	if [ -s $SERBOOT_FILENAME ]
+	then
+		mv $SERBOOT_FILENAME $CODE_FILE
+	fi
+
+	cd -
+fi
+
+if [ $NETBOOT_ENABLED = Y -o $SERBOOT_ENABLED = Y ]
+then
+	if [ -s ${DOWNLOAD_PATH}/${CODE_FILE} ]
+	then
+	        extract_and_run ${DOWNLOAD_PATH}/${CODE_FILE}
+	else
+		echo "FASTPATH download failed!"
+	fi
+	cleanup_download
+fi
+}
+
+organize_crash_dumps()
+{
+    if [ ! -d $CONFIG_PATH/crashlogs ]
+    then
+        mkdir -p $CONFIG_PATH/crashlogs
+    fi
+    if ls ${CONFIG_PATH}/error.* >/dev/null 2>&1
+    then
+        for i in $CONFIG_PATH/error.* ;
+        do
+            rm -f $CONFIG_PATH/crashlogs/error.4
+              for j in 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0 ;
+                do
+                    k=`expr $j + 1`
+                        if [ -f $CONFIG_PATH/crashlogs/error.$j ]
+                                then
+                            mv $CONFIG_PATH/crashlogs/error.$j $CONFIG_PATH/crashlogs/error.$k
+                                fi
+                          done
+                mv $i $CONFIG_PATH/crashlogs/error.0
+                done
+    fi
+}
+
+main_menu()
+{
+trap ':' 10
+
+revision_info
+
+cat << __START__
+Select startup mode.  If no selection is made within 5 seconds,
+the FASTPATH Application will start automatically...
+
+FASTPATH Startup -- Main Menu
+  
+1 - Start FASTPATH Application
+2 - Display Utility Menu
+__START__
+echo -n "Select (1, 2): "
+
+startup_delay &
+
+read CHOICE
+
+if kill -0 $! 2>/dev/null; then
+kill -9 $!
+sleep 1
+fi >/dev/null 2>&1
+
+if [ "$CHOICE" = "" ]
+then
+    CHOICE=1
+    echo " "
+fi
+
+trap '' 10
+}
+
+revision_info()
+{
+cat << __START__
+
+FASTPATH Startup Rev: $REVISION_STRING
+
+__START__
+}
+
+startup_menu()
+{
+
+revision_info
+
+cat << __START__
+FASTPATH Startup -- Utility Menu
+
+ 1  - Start FASTPATH Application
+ 2  - Load Code Update Package
+ 3  - Load Configuration
+ 4  - Select Serial Speed
+ 5  - Retrieve Error Log
+ 6  - Erase Current Configuration
+ 7  - Erase Permanent Storage
+ 8  - Select Boot Method
+ 9  - Activate Backup Image
+10  - Start Diagnostic Application
+11  - Reboot
+
+ Q  - Quit from FASTPATH Startup
+
+__START__
+
+echo -n "Select option (1-11 or Q): "
+read CHOICE
+}
+
+prepare_download()
+{
+echo -n "Creating $DOWNLOAD_FSTYPE filesystem on $DOWNLOAD_DEV for download..."
+
+mount $DOWNLOAD_PATH >/dev/null 2>&1
+
+echo "done."
+cd $CONFIG_PATH
+CODE_FILE=image1
+CODE_FILE_ENV=$(bootenv -d active)
+if [ "x$CODE_FILE_ENV" = "ximage1" -o "x$CODE_FILE_ENV" = "ximage2" ]
+then
+        CODE_FILE=$CODE_FILE_ENV
+fi
+}
+
+cleanup_download()
+{
+echo -n "Destroying $DOWNLOAD_FSTYPE filesystem on $DOWNLOAD_DEV..."
+
+umount $DOWNLOAD_PATH >/dev/null 2>&1
+
+echo "done."
+}
+
+tftp_download()
+{
+  TARGET=$1
+
+  if [ "$HOST_NETMASK" = "" ] ; then
+    HOST_NETMASK=255.255.255.0
+  fi
+
+  prompt_user "Enter Server IP" "$SERVER_IP"
+  SERVER_IP=$PROMPT_RETURN
+  prompt_user "Enter Host IP" "$HOST_IP"
+  HOST_IP=$PROMPT_RETURN
+  prompt_user "Enter Host Subnet Mask" "$HOST_NETMASK"
+  HOST_NETMASK=$PROMPT_RETURN
+  prompt_user "Enter Gateway IP" "$GATEWAY_IP"
+  GATEWAY_IP=$PROMPT_RETURN
+  prompt_user "Enter Filename" "$FILENAME"
+  FILENAME=$PROMPT_RETURN
+
+  prompt_user "Do you want to continue? Press(Y/N): "
+  CONFIRM=$PROMPT_RETURN
+  if ! check_one_of $CONFIRM y Y; then
+    XFER_FILE_ABORT=Y
+    return
+  fi
+
+  echo -n "Bringing up eth0 interface..."
+  ifconfig eth0 $HOST_IP netmask $HOST_NETMASK up
+  echo "done."
+
+  if [ "$GATEWAY_IP" ]; then
+    echo -n "Adding default gateway $GATEWAY_IP to the Routing Table..." 
+    route add default gw $GATEWAY_IP eth0
+    echo "done."
+  fi
+
+  # Need to test for tftp failure...
+  tftp -g -r $FILENAME -l ${DOWNLOAD_PATH}/${TARGET} $SERVER_IP
+
+  echo -n "Bringing down eth0 interface..."
+  ifconfig eth0 0.0.0.0 down
+  echo "done."
+
+  XFER_FILE_ABORT=N
+
+}
+
+log_tftp_upload()
+{
+  if [ "$HOST_NETMASK" = "" ] ; then
+    HOST_NETMASK=255.255.255.0
+  fi
+
+  prompt_user "Enter Server IP" "$SERVER_IP"
+  SERVER_IP=$PROMPT_RETURN
+  prompt_user "Enter Host IP" "$HOST_IP"
+  HOST_IP=$PROMPT_RETURN
+  prompt_user "Enter Host Subnet Mask" "$HOST_NETMASK"
+  HOST_NETMASK=$PROMPT_RETURN
+  prompt_user "Enter Gateway IP" "$GATEWAY_IP"
+  GATEWAY_IP=$PROMPT_RETURN
+
+  prompt_user "Do you want to continue? Press(Y/N): "
+  CONFIRM=$PROMPT_RETURN
+  if ! check_one_of $CONFIRM y Y; then
+    XFER_FILE_ABORT=Y
+    return
+  fi
+
+  echo -n "Bringing up eth0 interface..."
+  ifconfig eth0 $HOST_IP netmask $HOST_NETMASK up
+  echo "done."
+
+  if [ "$GATEWAY_IP" ]; then
+    echo -n "Adding default gateway $GATEWAY_IP to the Routing Table..." 
+    route add default gw $GATEWAY_IP eth0
+    echo "done."
+  fi
+
+  # Need to test for tftp failure...
+  tftp -p -r $LOG_NAME -l ${LOG_PATH}/${LOG_NAME} $SERVER_IP
+
+  echo -n "Bringing down eth0 interface..."
+  ifconfig eth0 0.0.0.0 down
+  echo "done."
+
+  XFER_FILE_ABORT=N
+
+}
+do_serial_download()
+{
+  TARGET=$1
+  XFER_MODE=$2
+
+  if [ -n "$XFER_MODE" ]; then
+    if [ $XFER_MODE = X -o $XFER_MODE = x ]; then
+      FILENAME=tmpfile
+    fi
+  fi
+
+echo -n "Do you want to continue? Press(Y/N): "
+read CHOICE
+
+case $CHOICE in
+y | Y)  cd $DOWNLOAD_PATH
+  
+  case $XFER_MODE in
+  x | X)  echo "Ready to receive file via XMODEM"
+    echo "Please start XMODEM sender before the receiver times out"
+    rx ${FILENAME}
+    ;;
+
+  y | Y)  echo "Ready to receive file via YMODEM"
+    echo "Please start YMODEM sender before the receiver times out"
+    rb
+    FILENAME=`ls`
+    ;;
+
+  z | Z)  echo "Ready to receive file via ZMODEM"
+    echo "Please start ZMODEM sender before the receiver times out"
+    rz
+    FILENAME=`ls`
+    ;;
+    
+  *)  echo "Invalid mode selected!" 
+    cd -
+    return
+    ;;
+  esac                   
+
+  if [ -s "$FILENAME" ]; then
+    mv $FILENAME $TARGET
+  fi
+
+  cd -
+  ;;    
+       
+*)  ;;
+esac
+}
+do_log_serial_upload()
+{
+  XFER_MODE=$1
+
+  echo -n "Do you want to continue? Press(Y/N): "
+  read CHOICE
+
+  case $CHOICE in
+  y | Y)  case $XFER_MODE in
+    x | X)  echo "Ready to send $LOG_NAME via XMODEM"
+      sx -O ${LOG_PATH}/${LOG_NAME}
+      ;;
+
+    y | Y)  echo "Ready to send $LOG_NAME via YMODEM"
+      sb -O ${LOG_PATH}/${LOG_NAME}
+      ;;
+
+    z | Z)  echo "Ready to send $LOG_NAME via ZMODEM"
+      sz -O ${LOG_PATH}/${LOG_NAME}
+      ;;
+    
+    *)  echo "Invalid mode selected!" 
+      return
+      ;;
+    esac                   
+    ;;    
+
+  *)  ;;
+  esac
+}
+prompt_user()
+{
+  PROMPT_RETURN=$2
+  CURVAL=
+  if [ $# -eq 2 ]; then
+    CURVAL="[$PROMPT_RETURN]:"
+  fi
+  echo -n "$1 $CURVAL"
+  read CHOICE
+  if [ -n "$CHOICE" ]; then
+    PROMPT_RETURN=$CHOICE
+  fi
+}
+
+check_one_of()
+{
+  val=$1;shift
+  while [ $# -gt 0 ]; do
+    if [ $1 = $val ]; then
+      return 0
+    fi
+  shift
+  done
+  return 1
+}
+
+load_fastpath_tgz()
+{
+  # Retrieve the active image filename from the environment variable active
+  cd $EXEC_PATH
+  echo "The FASTPATH active image not found, using default" ${CODE_FILE}
+
+  # Extract the swithcdriver zip from the active image
+  echo -n "Extracting FASTPATH from $CODE_FILE....."
+  extimage -i $CONFIG_PATH/$CODE_FILE -o $EXEC_PATH/$EXEC_NAME.tgz -n 3
+  echo  "done"
+
+  echo -n "Loading FASTPATH ....."
+  tar -xzf $EXEC_NAME.tgz
+  echo  "done"
+}
+
+config_download()
+{
+  prompt_user "Select Configuration Type (Press T/B for Text/Binary)" "$XFER_CONFIG_TYPE"
+  XFER_CONFIG_TYPE=$PROMPT_RETURN
+  prompt_user "Select Mode of Transfer (Press T/X/Y/Z for TFTP/XMODEM/YMODEM/ZMODEM)" "$XFER_FILE_MODE"
+  XFER_FILE_MODE=$PROMPT_RETURN
+
+  if check_one_of $XFER_CONFIG_TYPE t T b B; then
+    if check_one_of $XFER_FILE_MODE t T; then
+      tftp_download config.$XFER_CONFIG_TYPE
+    elif check_one_of $XFER_FILE_MODE x X y Y z Z; then
+      do_serial_download config.$XFER_CONFIG_TYPE $XFER_FILE_MODE
+    else
+      echo "Invalid Transfer mode!"
+      prompt_user "Press ENTER to continue"
+      return 0
+    fi
+  else
+    echo "Invalid configuration type!"
+    prompt_user "Press ENTER to continue"
+    return 0
+  fi
+
+  TMPFILE=$DOWNLOAD_PATH/config.$XFER_CONFIG_TYPE
+  if [ $XFER_FILE_ABORT = Y -o ! -s $TMPFILE ]; then
+    echo "Config download failed!"
+    prompt_user "Press <ENTER> to continue..."
+    return 0
+  fi
+
+  if [ ! -f $CONFIG_PATH/backup-config ]; then
+    if [ -f $CONFIG_PATH/startup-config ]; then
+      mv -f $CONFIG_PATH/startup-config $CONFIG_PATH/backup-config
+    fi
+  fi
+
+  TXTCFG_COMP=$EXEC_PATH/fpTxtCfgComp.exe
+  if [ ! -f $TXTCFG_COMP ]; then
+    load_fastpath_tgz
+  fi
+
+  if test $XFER_CONFIG_TYPE = B; then
+    cp -f $TMPFILE $CONFIG_PATH/fastpath.cfg
+  elif test -f $TXTCFG_COMP; then
+    $TXTCFG_COMP $TMPFILE $TMPFILE.comp
+    cp -f $TMPFILE.comp $CONFIG_PATH/startup-config
+  else
+    cp -f $TMPFILE $CONFIG_PATH/startup-config
+  fi
+}
+
+code_download()
+{
+  prompt_user "Select Mode of Transfer (Press T/X/Y/Z for TFTP/XMODEM/YMODEM/ZMODEM)" "$XFER_FILE_MODE"
+  XFER_FILE_MODE=$PROMPT_RETURN
+
+  if check_one_of $XFER_FILE_MODE t T; then
+    tftp_download $CODE_FILE
+  elif check_one_of $XFER_FILE_MODE x X y Y z Z; then
+    do_serial_download $CODE_FILE $XFER_FILE_MODE
+  else
+    echo "Invalid Transfer mode!"
+    prompt_user "Press ENTER to continue"
+    return 0
+  fi
+}
+
+log_upload()
+{
+  if [ ! -f ${CONFIG_PATH}/${LOG_NAME} ]; then
+    echo "The Log File ($LOG_NAME) does not exist"
+    echo
+    echo "Press ENTER to continue"
+    read CHOICE
+  fi
+
+  prompt_user "Select Mode of Transfer (Press T/X/Y/Z for TFTP/XMODEM/YMODEM/ZMODEM)" "$XFER_FILE_MODE"
+  XFER_FILE_MODE=$PROMPT_RETURN
+
+  if check_one_of $XFER_FILE_MODE t T; then
+    log_tftp_upload
+  elif check_one_of $XFER_FILE_MODE x X y Y z Z; then
+    do_log_serial_upload $XFER_FILE_MODE
+  else
+    echo "Invalid Transfer mode!"
+    prompt_user "Press ENTER to continue"
+    return 0
+  fi
+}
+
+run_update()
+{
+cd $DOWNLOAD_PATH
+
+if [ ! -s $CODE_FILE ]
+then
+	echo "Code download failed!"
+	echo "Press <ENTER> to continue..."
+	read CHOICE
+else
+	echo "Saving code file..."
+	cp $CODE_FILE $CONFIG_PATH
+
+        # Attempt to extract ACTIVATE instructions
+	extimage -i $CODE_FILE -o $UPDATE_FILE -n 2
+	if [ -s $UPDATE_FILE ]
+	then
+		echo "Code update instructions found!"
+		sh $UPDATE_FILE $CODE_FILE
+		rm -f $UPDATE_FILE
+	fi
+	echo
+	echo "Critical components modified -- system reboot recommended!"
+	echo
+	echo -n "Reboot? (Y/N): "
+	read CHOICE
+
+	case $CHOICE in
+
+	y | Y)  echo ; echo "Rebooting..."
+		sync
+		kill 1
+        	while true; do
+                	sleep 30
+        	done
+
+		;;
+	*)  ;;
+	esac
+
+fi
+
+cd -
+}
+
+load_modules()
+{
+
+cd $EXEC_PATH
+
+L7_MODULE_LIST=$(grep "L7_MODULE_LIST" ${EXEC_PATH}/${VPD_FILE} | cut -d= -f2-)
+INSMOD_PARAMS=""
+for WORD in ${L7_MODULE_LIST};
+do
+        if [ -f ${WORD} ]
+	then
+		MD5SUM_RESULTS=`md5sum -c ${WORD}.md5sum`
+  		if [ "$MD5SUM_RESULTS" != "${WORD}: OK" ]
+  		then
+  			echo "${WORD} checksum failure!"
+			exit 2
+		fi 
+		if [ "x${INSMOD_PARAMS}" != "x" ]
+		then
+		        `insmod ${INSMOD_PARAMS}`
+		fi
+		INSMOD_PARAMS=${WORD}
+	else
+	        INSMOD_PARAMS="${INSMOD_PARAMS} ${WORD}"
+	fi
+done
+if [ "x${INSMOD_PARAMS}" != "x" ]
+then
+        `insmod ${INSMOD_PARAMS}`
+fi
+for MODULE_NAME in ${L7_MODULE_LIST};
+do
+        if [ -f ${MODULE_NAME} ]
+	then
+	        rm -f ${MODULE_NAME}.md5sum
+		rm -f ${MODULE_NAME}
+	fi
+done
+cd -
+return 0
+}
+
+run_application()
+{
+echo 1 > /proc/sys/vm/overcommit_memory
+echo 1 > /proc/sys/kernel/panic_on_oops
+echo 15 > /proc/sys/kernel/panic
+
+if [ $TELNET_ENABLED = Y ]
+then
+	/bin/utelnetd -p $TELNET_PORT -d >/dev/null 2>&1
+fi
+
+cd /
+application_setup
+
+
+if [ $NETWORKING_ENABLED = Y ]
+then
+	ifconfig eth0 $NETWORKING_IP netmask $NETWORKING_NETMASK up
+	route add default gw $NETWORKING_GW eth0
+else
+	ifconfig eth0 0.0.0.0 up
+fi
+
+# Retrieve the active image filename from the environment variable active
+cd $EXEC_PATH
+
+if ! extract_and_run ${CONFIG_PATH}/${CODE_FILE} 
+then
+    if [ "x${CODE_FILE}" = "ximage1" ]
+    then
+	CODE_FILE=image2
+    else
+	CODE_FILE=image1
+    fi
+    if [ -s ${CONFIG_PATH}/${CODE_FILE} ]
+    then
+	echo "Failed to start FASTPATH, trying other image ${CODE_FILE}"
+	# Make sure Fastpath uses this as the active image going forward
+	bootenv -s active ${CODE_FILE}
+	extract_and_run ${CONFIG_PATH}/${CODE_FILE} 
+    fi
+fi
+
+cd -
+
+if [ $TELNET_ENABLED = Y ]
+then
+	/usr/bin/killall -9 utelnetd >/dev/null 2>&1
+fi
+
+echo "FASTPATH not executed!"
+
+echo "Press <ENTER> to continue..."
+read CHOICE
+}
+
+#save_serial_parms()
+#{
+# Nothing to do on this platform
+#}
+
+change_serial_speed()
+{
+cat << __START__
+1 - 1200
+2 - 2400
+3 - 4800
+4 - 9600
+5 - 19200
+6 - 38400
+7 - 57600
+8 - 115200
+9 - Exit without change
+__START__
+echo -n "Select option (1-9): "
+
+read CHOICE
+
+case $CHOICE in
+1)	BAUDCHOICE=1200
+	;;
+2)	BAUDCHOICE=2400
+	;;
+3)	BAUDCHOICE=4800
+	;;
+4)	BAUDCHOICE=9600
+	;;
+5)	BAUDCHOICE=19200
+	;;
+6)	BAUDCHOICE=38400
+	;;   
+7)	BAUDCHOICE=57600
+	;;
+8)	BAUDCHOICE=115200
+	;;
+9)	echo "No change."
+	BAUDCHOICE=       
+	;;
+*)	echo "Invalid choice!  No action." 
+	BAUDCHOICE=       
+	;;  
+esac
+
+if [ -n "$BAUDCHOICE" ]
+then
+BAUDRATE=$BAUDCHOICE
+echo "Changing serial speed to ${BAUDRATE}..."
+stty $BAUDRATE
+#save_serial_parms
+fi
+
+}
+
+save_netboot_parms()
+{
+echo "NETBOOT_ENABLED=$NETBOOT_ENABLED" > ${CONFIG_PATH}/${NETBOOT_PARMS}
+echo "NETBOOT_SERVER_IP=$NETBOOT_SERVER_IP" >> ${CONFIG_PATH}/${NETBOOT_PARMS}
+echo "NETBOOT_HOST_IP=$NETBOOT_HOST_IP" >> ${CONFIG_PATH}/${NETBOOT_PARMS}
+echo "NETBOOT_HOST_NETMASK=$NETBOOT_HOST_NETMASK" >> ${CONFIG_PATH}/${NETBOOT_PARMS}
+echo "NETBOOT_GATEWAY_IP=$NETBOOT_GATEWAY_IP" >> ${CONFIG_PATH}/${NETBOOT_PARMS}
+echo "NETBOOT_FILENAME=$NETBOOT_FILENAME" >> ${CONFIG_PATH}/${NETBOOT_PARMS}
+md5sum ${CONFIG_PATH}/${NETBOOT_PARMS} > ${CONFIG_PATH}/${NETBOOT_PARMS}.md5sum
+}
+
+read_netboot_parms()
+{
+if [ -s ${CONFIG_PATH}/${NETBOOT_PARMS} ] \
+&& md5sum -c ${CONFIG_PATH}/${NETBOOT_PARMS}.md5sum >/dev/null 2>&1
+then
+	. ${CONFIG_PATH}/${NETBOOT_PARMS}
+else
+	NETBOOT_ENABLED=N
+	NETBOOT_SERVER_IP=
+	NETBOOT_HOST_IP=
+	NETBOOT_HOST_NETMASK=
+	NETBOOT_GATEWAY_IP=
+	NETBOOT_FILENAME=
+fi
+}
+
+save_serboot_parms()
+{
+echo "SERBOOT_ENABLED=$SERBOOT_ENABLED" > ${CONFIG_PATH}/${SERBOOT_PARMS}
+echo "SERBOOT_XFER_MODE=$SERBOOT_XFER_MODE" >> ${CONFIG_PATH}/${SERBOOT_PARMS}
+md5sum ${CONFIG_PATH}/${SERBOOT_PARMS} > ${CONFIG_PATH}/${SERBOOT_PARMS}.md5sum
+}
+
+read_serboot_parms()
+{
+if [ -s ${CONFIG_PATH}/${SERBOOT_PARMS} ] \
+&& md5sum -c ${CONFIG_PATH}/${SERBOOT_PARMS}.md5sum >/dev/null 2>&1
+then
+	. ${CONFIG_PATH}/${SERBOOT_PARMS}
+else
+	SERBOOT_ENABLED=N
+	SERBOOT_XFER_MODE=
+fi
+}
+
+select_boot_method()
+{
+echo -n "Current boot method: "
+
+if [ $NETBOOT_ENABLED = Y ]
+then
+	echo "NETWORK"
+elif [ $SERBOOT_ENABLED = Y ]
+then
+	echo "SERIAL"
+else
+	echo "FLASH"
+fi
+
+cat << __START__
+1 - Flash Boot
+2 - Network Boot
+3 - Serial Boot
+4 - Exit without change
+__START__
+echo -n "Select option (1-4): "
+
+read CHOICE
+
+case $CHOICE in
+1)	NETBOOT_ENABLED=N
+	save_netboot_parms
+	SERBOOT_ENABLED=N
+	save_serboot_parms
+	;;
+2)	echo -n "Enter Server IP [$NETBOOT_SERVER_IP]: "
+	read CHOICE
+	if [ -n "$CHOICE" ]
+	then
+		NETBOOT_SERVER_IP=$CHOICE
+	fi
+	echo -n "Enter Host IP [$NETBOOT_HOST_IP]: "
+	read CHOICE
+	if [ -n "$CHOICE" ]
+	then
+		NETBOOT_HOST_IP=$CHOICE
+	fi
+	if [ "$NETBOOT_HOST_NETMASK" = "" ] ; then
+	    NETBOOT_HOST_NETMASK=255.255.255.0
+	fi
+	echo -n "Enter Host Subnet Mask [$NETBOOT_HOST_NETMASK]: "
+	read CHOICE
+	if [ -n "$CHOICE" ]
+	    then
+	    NETBOOT_HOST_NETMASK=$CHOICE
+	fi
+	echo -n "Enter Gateway IP [$NETBOOT_GATEWAY_IP]: "
+	read CHOICE
+	if [ -n "$CHOICE" ]
+	then
+		NETBOOT_GATEWAY_IP=$CHOICE
+	fi
+	echo -n "Enter Filename [$NETBOOT_FILENAME]: "
+	read CHOICE
+	if [ -n "$CHOICE" ]
+	then
+		NETBOOT_FILENAME=$CHOICE
+	fi
+
+	echo -n "Accept changes? Press(Y/N): "
+	read CHOICE
+
+	case $CHOICE in
+
+	y | Y)	NETBOOT_ENABLED=Y
+		save_netboot_parms
+		SERBOOT_ENABLED=N
+		save_serboot_parms
+		;;
+	n | N)	read_netboot_parms
+		;;
+	*)	echo "Invalid choice!  No change." 
+		read_netboot_parms
+		;;
+	esac
+	;;
+3)	echo -n "Select Mode of Transfer (Press X/Y/Z for XMODEM/YMODEM/ZMODEM) [$SERBOOT_XFER_MODE]: "
+	read CHOICE
+	if [ -n "$CHOICE" ]
+	then
+		SERBOOT_XFER_MODE=$CHOICE
+	fi
+
+	echo -n "Accept changes? Press(Y/N): "
+	read CHOICE
+
+	case $CHOICE in
+
+	y | Y)	SERBOOT_ENABLED=Y
+		save_serboot_parms
+		NETBOOT_ENABLED=N
+		save_netboot_parms
+		;;
+	n | N)	read_serboot_parms
+		;;
+	*)	echo "Invalid choice!  No change." 
+		read_serboot_parms
+		;;
+	esac
+	;;
+4)	echo "No change."
+	;;
+*)	echo "Invalid choice.  No change."
+	;;
+esac
+}
+
+activate_backup_image()
+{
+cd $CONFIG_PATH
+
+CODE_FILE_ENV=$(bootenv -d active)
+CODE_FILE=image1
+if [ "x$CODE_FILE_ENV" = "ximage1" -o "x$CODE_FILE_ENV" = "ximage2" ]
+then
+      if [ $CODE_FILE_ENV = "image1" ]
+      then
+          CODE_FILE=image2
+      fi
+
+      if [ ! -e $CODE_FILE ]
+      then
+          echo "$CODE_FILE file not present!"
+          echo "Can not activate $CODE_FILE."
+      else
+          bootenv -s active $CODE_FILE
+          CODE_FILE=$(bootenv -d active)
+          echo Image ${CODE_FILE} is now active.
+      fi
+fi
+
+
+# Attempt to extract UPDATE instructions
+extimage -i ${CODE_FILE} -o $UPDATE_FILE -n 2
+if [ -s $UPDATE_FILE ]
+    then
+    echo "Code update instructions found!"
+    echo
+    sh $UPDATE_FILE ${CODE_FILE}
+    rm -f $UPDATE_FILE
+fi
+echo
+echo "${CODE_FILE} activated -- system reboot recommended!"
+echo
+echo -n "Reboot? (Y/N): "
+read CHOICE
+
+case $CHOICE in    
+    y | Y)  echo ; echo "Rebooting..."
+      sync
+      kill 1
+      while true; do
+	  sleep 30
+      done
+      ;;
+      *)  ;;
+      esac
+}       
+
+save_debug_parms()
+{
+echo "TELNET_ENABLED=$TELNET_ENABLED" > ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "TELNET_PORT=$TELNET_PORT" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "CRASH_HALT=$CRASH_HALT" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "MALLOC_CHECK_ENABLED=$MALLOC_CHECK_ENABLED" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "MALLOC_CHECK_LEVEL=$MALLOC_CHECK_LEVEL" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "GDBSERVER_ENABLED=$GDBSERVER_ENABLED" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "GDBSERVER_TTY=$GDBSERVER_TTY" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "NETWORKING_ENABLED=$NETWORKING_ENABLED" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "NETWORKING_IP=$NETWORKING_IP" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "NETWORKING_NETMASK=$NETWORKING_NETMASK" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+echo "NETWORKING_GW=$NETWORKING_GW" >> ${CONFIG_PATH}/${DEBUG_PARMS}
+md5sum ${CONFIG_PATH}/${DEBUG_PARMS} > ${CONFIG_PATH}/${DEBUG_PARMS}.md5sum
+}
+
+read_debug_parms()
+{
+if [ -s ${CONFIG_PATH}/${DEBUG_PARMS} ] \
+&& md5sum -c ${CONFIG_PATH}/${DEBUG_PARMS}.md5sum >/dev/null 2>&1
+then
+	. ${CONFIG_PATH}/${DEBUG_PARMS}
+fi
+
+if [ -z $TELNET_ENABLED ]
+then
+	TELNET_ENABLED=N
+fi
+
+if [ -z $TELNET_PORT ]
+then
+	TELNET_PORT=2323
+fi
+
+if [ -z $CRASH_HALT ]
+then
+	CRASH_HALT=N
+fi
+
+if [ -z $MALLOC_CHECK_ENABLED ]
+then
+	MALLOC_CHECK_ENABLED=N
+fi
+
+if [ -z $MALLOC_CHECK_LEVEL ]
+then
+	MALLOC_CHECK_LEVEL=1
+fi
+
+if [ -z $GDBSERVER_ENABLED ]
+then
+	GDBSERVER_ENABLED=N
+fi
+
+if [ -z $GDBSERVER_TTY ]
+then
+	GDBSERVER_TTY=1.2.3.4:5678
+fi
+
+if [ -z $NETWORKING_ENABLED ]
+then
+	NETWORKING_ENABLED=N
+fi
+
+if [ -z $NETWORKING_IP ]
+then
+	NETWORKING_IP=0.0.0.0
+fi
+
+if [ -z $NETWORKING_NETMASK ]
+then
+        NETWORKING_NETMASK=255.255.255.0
+fi
+
+if [ -z $NETWORKING_GW ]
+then
+	NETWORKING_GW=0.0.0.0
+fi
+}
+
+debug_options_menu()
+{
+while true
+do
+
+echo -e "\nDebug Options Menu\n"
+
+echo -n "Telnet daemon is currently "
+
+if [ $TELNET_ENABLED = Y ]
+then
+	echo "ENABLED (port ${TELNET_PORT})."
+else
+	echo "DISABLED."
+fi
+
+echo -n "Halt on crash detect is currently "
+
+if [ $CRASH_HALT = Y ]
+then
+	echo "ENABLED."
+else
+	echo "DISABLED."
+fi
+
+echo -n "MALLOC_CHECK_ is currently "
+
+if [ $MALLOC_CHECK_ENABLED = Y ]
+then
+	echo "ENABLED (level ${MALLOC_CHECK_LEVEL})."
+else
+	echo "DISABLED."
+fi
+
+echo -n "GDB server is currently "
+
+if [ $GDBSERVER_ENABLED = Y ]
+then
+	echo "ENABLED (tty ${GDBSERVER_TTY})."
+else
+	echo "DISABLED."
+fi
+
+echo -n "Networking is currently "
+
+if [ $NETWORKING_ENABLED = Y ]
+then
+	echo "ENABLED (ip ${NETWORKING_IP} netmask ${NETWORKING_NETMASK} gw ${NETWORKING_GW})."
+else
+	echo "DISABLED."
+fi
+
+cat << __START__
+
+1 - Enable/Disable Telnet daemon
+2 - Enable/Disable Halt on crash detection
+3 - Enable/Disable MALLOC_CHECK_
+4 - Enable/Disable GDB server
+5 - Enable/Disable Networking
+6 - Exit without change
+
+__START__
+echo -n "Select option (1-6): "
+
+read CHOICE
+
+case $CHOICE in
+1)	if [ $TELNET_ENABLED = Y ]
+	then
+		TELNET_ENABLED=N
+	else
+		TELNET_ENABLED=Y
+		echo -n "Enter TCP port: [${TELNET_PORT}]: "
+		read PORT
+		if [ -n "$PORT" ]
+		then
+			TELNET_PORT=$PORT
+		fi
+	fi
+	save_debug_parms
+	;;
+2)	if [ $CRASH_HALT = Y ]
+	then
+		CRASH_HALT=N
+	else
+		CRASH_HALT=Y
+	fi
+	save_debug_parms
+	;;
+3)	if [ $MALLOC_CHECK_ENABLED = Y ]
+	then
+		MALLOC_CHECK_ENABLED=N
+	else
+		MALLOC_CHECK_ENABLED=Y
+		echo -n "Enter MALLOC_CHECK_ level: [${MALLOC_CHECK_LEVEL}]: "
+		read LEVEL
+		if [ -n "$LEVEL" ]
+		then
+			MALLOC_CHECK_LEVEL=$LEVEL
+		fi
+	fi
+	save_debug_parms
+	;;
+4)	if [ $GDBSERVER_ENABLED = Y ]
+	then
+		GDBSERVER_ENABLED=N
+	else
+		GDBSERVER_ENABLED=Y
+		echo -n "Enter GDB server tty: [${GDBSERVER_TTY}]: "
+		read TTY
+		if [ -n "$TTY" ]
+		then
+			GDBSERVER_TTY=$TTY
+		fi
+	fi
+	save_debug_parms
+	;;
+5)	if [ $NETWORKING_ENABLED = Y ]
+	then
+		NETWORKING_ENABLED=N
+	else
+		NETWORKING_ENABLED=Y
+		echo -n "Enter IP: [${NETWORKING_IP}]: "
+		read IP
+		if [ -n "$IP" ]
+		then
+			NETWORKING_IP=$IP
+		fi
+		echo -n "Enter Netmask: [${NETWORKING_NETMASK}]: "
+		read NETMASK
+		if [ -n "$NETMASK" ]
+		then
+			NETWORKING_NETMASK=$NETMASK
+		fi
+		echo -n "Enter GW: [${NETWORKING_GW}]: "
+		read GW
+		if [ -n "$GW" ]
+		then
+			NETWORKING_GW=$GW
+		fi
+	fi
+	save_debug_parms
+	;;
+6)	echo "No change."
+	break
+	;;
+V)  
+  if [ "$VERBOSE" = Y ]; then
+    VERBOSE=N
+    set +x
+  else
+    VERBOSE=Y
+    set -x
+  fi
+  ;;
+
+*)	echo "Invalid choice."
+	;;
+esac
+
+done
+}
+
+format_config_fs()
+{
+echo -n "Do you want to erase the permanent storage? (Press Y/N): "
+read CHOICE
+case $CHOICE in
+y | Y)  cd
+        echo -n "Unmounting filesystem..."
+        umount $CONFIG_PATH >/dev/null 2>&1
+        echo "done."
+        echo -n "Formatting filesystem..."
+        eraseall $CONFIG_ERASE_DEV >/dev/null 2>&1
+        echo -n "Mounting filesystem..."
+        mount -t $CONFIG_FSTYPE $CONFIG_DEV $CONFIG_PATH >/dev/null 2>&1
+        echo "done."
+        cd -
+        #save_serial_parms
+        save_netboot_parms
+        save_serboot_parms
+        ;;
+*)      ;;
+esac
+}
+
+
+##############
+# START HERE #
+##############
+
+# Ignore most "death" signals...
+trap '' 1 2 3 15
+
+# Turn-off output from most printk()'s
+echo "0       4       1       7" > /proc/sys/kernel/printk
+
+# Source /etc/profile
+. /etc/profile
+
+# Kill-off any old telnet daemons...
+/usr/bin/killall -9 utelnetd >/dev/null 2>&1
+
+ifconfig eth0 0.0.0.0 down
+
+stty sane
+stty erase ^H
+cd /
+mount_config_fs
+
+read_debug_parms
+
+read_netboot_parms
+read_serboot_parms
+
+mount_app_fs
+
+# Get current baudrate
+BAUDRATE=`stty speed`
+
+# Check for kernel crashes
+/usr/sbin/kernelcrash
+
+cd
+
+if ls ${CONFIG_PATH}/error.* >/dev/null 2>&1
+then
+	echo -e "\nCrash information files detected!"
+	if [ $CRASH_HALT = Y ]
+	then
+	        organize_crash_dumps
+		CHOICE=2
+	else
+	        organize_crash_dumps
+		main_menu
+	fi
+else
+	main_menu
+fi
+
+case $CHOICE in
+1)	run_application 
+	startup_menu
+	;;
+    
+2)	startup_menu
+	;;
+*)	echo "Invalid option!  Displaying startup menu..."
+	startup_menu
+	;;
+esac
+
+while :
+do
+case $CHOICE in
+q | Q)	cd /
+	echo -n "Quitting..."
+	echo "7       4       1       7" > /proc/sys/kernel/printk
+	echo "done."
+	trap 1 2 3 15
+	exec /sbin/getty -L ttyS0 $BAUDRATE
+	;;
+1)	run_application
+  	;;
+2)  prepare_download
+    code_download
+    run_update
+    cleanup_download
+    ;;
+3)  prepare_download
+    config_download
+    cleanup_download
+    ;;
+4)  change_serial_speed
+    ;;
+5)  log_upload
+    ;;
+6)  echo -n "Erasing present configuration..."
+    rm -f ${CONFIG_PATH}/*.cfg
+    rm -f ${CONFIG_PATH}/startup-config
+    sync
+    echo "done."
+    ;;
+7)  format_config_fs
+    ;;
+8)  select_boot_method
+    ;;
+9)  activate_backup_image
+    ;;
+10) RUN_DIAGNOSTICS=Y
+    run_application
+    ;;
+11) echo "Rebooting..."
+    kill 1
+    sleep 30
+    ;;
+d | D)  debug_options_menu
+        ;;
+*)  echo "Invalid option!"    
+    ;;
+
+esac
+
+startup_menu
+
+done

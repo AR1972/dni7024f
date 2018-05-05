@@ -1,0 +1,50 @@
+#!/bin/sh
+mkdir root
+mkdir root/dev
+mknod -m 0644 root/dev/dprobes c 254 0
+mknod -m 0644 root/dev/i2c-0 c 89 0
+mknod -m 0644 root/dev/i2c-1 c 89 1
+mknod -m 0644 root/dev/linux-kernel-bde c 127 0
+mknod -m 0644 root/dev/linux-user-bde c 126 0
+mknod -m 0644 root/dev/mem c 1 1
+mknod -m 0644 root/dev/mtd0 c 90 0
+mknod -m 0644 root/dev/mtd1 c 90 2
+mknod -m 0644 root/dev/mtd2 c 90 4
+mknod -m 0644 root/dev/mtd3 c 90 6
+mknod -m 0644 root/dev/mtd4 c 90 8
+mknod -m 0644 root/dev/mtd5 c 90 10
+mknod -m 0644 root/dev/mtdblock0 b 31 0
+mknod -m 0644 root/dev/mtdblock1 b 31 1
+mknod -m 0644 root/dev/mtdblock2 b 31 2
+mknod -m 0644 root/dev/mtdblock3 b 31 3
+mknod -m 0644 root/dev/mtdblock4 b 31 4
+mknod -m 0644 root/dev/mtdblock5 b 31 5
+mknod -m 0644 root/dev/null c 1 3
+mknod -m 0644 root/dev/ptyp0 c 2 0
+mknod -m 0644 root/dev/ptyp1 c 2 1
+mknod -m 0644 root/dev/ptyp2 c 2 2
+mknod -m 0644 root/dev/ptyp3 c 2 3
+mknod -m 0644 root/dev/ptyp4 c 2 4
+mknod -m 0644 root/dev/ptyp5 c 2 5
+mknod -m 0644 root/dev/ptyp6 c 2 6
+mknod -m 0644 root/dev/ptyp7 c 2 7
+mknod -m 0644 root/dev/ram0 b 1 0
+mknod -m 0644 root/dev/ram1 b 1 1
+mknod -m 0644 root/dev/ram2 b 1 2
+mknod -m 0644 root/dev/rtc c 10 135
+mknod -m 0644 root/dev/tap c 10 200
+mknod -m 0644 root/dev/tracer c 217 0
+mknod -m 0644 root/dev/tracerU c 217 1
+mknod -m 0644 root/dev/tty c 5 0
+mknod -m 0644 root/dev/tty0 c 4 0
+mknod -m 0644 root/dev/ttyp0 c 3 0
+mknod -m 0644 root/dev/ttyp1 c 3 1
+mknod -m 0644 root/dev/ttyp2 c 3 2
+mknod -m 0644 root/dev/ttyp3 c 3 3
+mknod -m 0644 root/dev/ttyp4 c 3 4
+mknod -m 0644 root/dev/ttyp5 c 3 5
+mknod -m 0644 root/dev/ttyp6 c 3 6
+mknod -m 0644 root/dev/ttyp7 c 3 7
+mknod -m 0644 root/dev/ttyS0 c 4 64
+mknod -m 0644 root/dev/zero c 1 5
+ln -s ttyS0 root/dev/console

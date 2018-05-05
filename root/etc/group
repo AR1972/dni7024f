@@ -1,0 +1,13 @@
+root:*:0:root,operator
+bin:*:1:bin
+daemon:*:2:daemon
+sys:*:3:sys
+tty:*:5:
+disk:*:6:
+sync:*:8:sync
+halt:*:10:halt
+kmem:*:15:
+utmp:*:16:
+shadow:*:17:
+users:*:100:
+nogroup:*:65534:

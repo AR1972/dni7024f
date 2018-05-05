@@ -1,0 +1,16 @@
+# /etc/profile: system-wide .profile file for the Bourne shell (sh(1))
+# and Bourne compatible shells (bash(1), ksh(1), ash(1), ...).
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+if [ "`id -u`" -eq 0 ]; then
+  PS1='# '
+else
+  PS1='$ '
+fi
+
+ENVCRASHOFF=0x10000
+
+export PATH PS1 ENVCRASHOFF
+
+umask 022

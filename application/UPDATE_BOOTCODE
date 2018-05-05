@@ -1,0 +1,184 @@
+#!/bin/sh
+
+# This is a script which will update u-boot on the switch.
+
+# For any code update changes, this is the only file which needs to 
+# be changed (i.e. neither startup code nor operational code change).
+
+APPLICATION_PATH=/mnt/application
+IMAGE_PATH=/mnt/fastpath
+UBOOT_NAME=u-boot.bin
+UBOOT_DEV=/dev/mtd1
+UBOOT_ENV_DEV=/dev/mtd2
+UBOOT_ENV_FILE=${APPLICATION_PATH}/u-boot-env.tmp
+
+VERBOSE=1
+REBOOT=0
+
+IMAGE_FILE=$1
+
+extract_uboot()
+{
+if [ $VERBOSE = 1 ]
+then
+	echo "Extracting components.  Please wait..."
+fi
+
+cd ${APPLICATION_PATH}
+
+if [ -s ${IMAGE_PATH}/${IMAGE_FILE} ]
+then
+        # Extract once to get the file names (u-boot.bin and its md5sum)
+        # exactly as stored in the tarball. Then extract again to get 
+        # just those files. This saves tmpfs space over extracting the 
+        # whole tarball.
+        FILES=`extimage -n 3 -i ${IMAGE_PATH}/${IMAGE_FILE} -o - | tar tzf - | grep ${UBOOT_NAME}`
+	extimage -n 3 -i ${IMAGE_PATH}/${IMAGE_FILE} -o - | tar xzf - ${FILES}
+else
+        if [ $VERBOSE = 1]
+	then
+        echo "Image file ${IMAGE_FILE} not found!"
+	fi
+	exit 2
+fi
+}
+
+update_uboot()
+{
+if [ $VERBOSE = 1 ]
+then
+	echo "Integrity-checking components.  Please wait..."
+fi
+   
+# Go to the applicaton directory
+cd ${APPLICATION_PATH}
+
+# Check for PPCBoot...
+if [ -s ${UBOOT_NAME}.md5sum ]
+then
+
+	if [ ! -s ${UBOOT_NAME} ]
+	then
+		if [ $VERBOSE = 1 ]
+		then
+			echo "$UBOOT_NAME not found!"
+		fi
+		exit 2
+	else
+		MD5SUM_RESULTS=`md5sum -c ${UBOOT_NAME}.md5sum`
+		if [ "$MD5SUM_RESULTS" != "${UBOOT_NAME}: OK" ]
+		then
+			if [ $VERBOSE = 1 ]
+			then
+				echo "${UBOOT_NAME}: md5sum failed!"
+			fi
+			exit 3
+		else
+		        # Preserve U-boot environment
+		        rm -f ${UBOOT_ENV_FILE}
+			dd if=${UBOOT_ENV_DEV} of=${UBOOT_ENV_FILE} > /dev/null 2>&1
+			if [ ! -s ${UBOOT_ENV_FILE} ]
+			then
+			        if [ $VERBOSE = 1 ]
+				then
+			                echo "Could not retrieve U-Boot environment"
+				fi
+			fi
+		        if [ $VERBOSE = 1 ]
+			then
+			        echo "Erasing ${UBOOT_DEV}..."
+		        fi
+			if ! eraseall $UBOOT_DEV >/dev/null 2>&1
+			then
+				if [ $VERBOSE = 1 ]
+				then
+					echo "Erase of ${UBOOT_DEV} failed!"
+				fi
+				exit 4
+			fi
+		        if [ $VERBOSE = 1 ]
+			then
+			        echo "Flashing ${UBOOT_DEV}..."
+		        fi
+			if ! cp $UBOOT_NAME $UBOOT_DEV >/dev/null 2>&1
+			then
+				if [ $VERBOSE = 1 ]
+				then
+					echo "Copy of ${UBOOT_NAME} to ${UBOOT_DEV} failed!"
+				fi
+				exit 5
+			fi
+			REBOOT=1
+			if [ $VERBOSE = 1 ]
+			then
+			        echo "Restoring U-Boot environment..."
+			fi
+			if ! eraseall $UBOOT_ENV_DEV >/dev/null 2>&1
+			then
+				if [ $VERBOSE = 1 ]
+				then
+					echo "Erase of ${UBOOT_ENV_DEV} failed!"
+				fi
+				exit 4
+			fi
+		        if [ $VERBOSE = 1 ]
+			then
+			        echo "Flashing ${UBOOT_ENV_DEV}..."
+		        fi
+			if ! cp $UBOOT_ENV_FILE $UBOOT_ENV_DEV >/dev/null 2>&1
+			then
+				if [ $VERBOSE = 1 ]
+				then
+					echo "Copy of environment to ${UBOOT_ENV_DEV} failed!"
+				fi
+				exit 5
+			fi
+			rm -f $UBOOT_ENV_FILE
+		fi
+	fi
+fi
+
+sync 
+
+# Don't leave the file hanging around tmpfs taking up space.
+rm -f ${UBOOT_NAME}
+rm -f ${UBOOT_NAME}.md5sum
+if [ $VERBOSE = 1 ]
+then
+	echo "Done."
+fi
+
+return
+}
+
+##############
+# START HERE #
+##############
+
+# Keep the script quiet when invoked by the CLI
+if [ $# = 2 ]
+then
+	if [ "$2" = "-q" ]
+	then
+		VERBOSE=0
+	else
+		echo "Invalid arguments to ${0}!"
+		exit 1
+	fi
+else
+	if [ $# -gt 2 ]
+	then
+		echo "Too many arguments to ${0}!"
+		exit 1
+	fi
+	if [ $# -lt 1 ]
+	then
+	        echo "Too few agruments to ${0}! Image name must be provided!"
+		exit 1
+        fi
+fi
+
+extract_uboot
+update_uboot
+
+exit 0

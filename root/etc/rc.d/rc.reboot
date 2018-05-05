@@ -1,0 +1,26 @@
+#!/bin/sh
+#######################################################
+#maintain data integrity with a sync of the filesystems
+#######################################################
+echo syncing filesystems....This may take a few moments
+sync
+
+####################################################### 
+#unmount the flash file system 
+#Note that this would fail withoout the force, as the
+#fastpath application keeps open file handles on the 
+#compact flash. The above sync, should maintain data
+#integrity.  
+#######################################################
+umount -f /mnt/fastpath
+umount -f /mnt/application
+
+#######################################################
+#this will turn off the ability to ^C out of this loop
+#Note that signal number 2 in the bash shell is SIGINT
+#for a list try trap -p
+#######################################################
+trap '' 2
+
+echo Rebooting system!
+/sbin/reboot

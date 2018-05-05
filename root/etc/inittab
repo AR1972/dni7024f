@@ -1,0 +1,8 @@
+# /etc/inittab: BusyBox init configuration.
+
+# Boot-time system configuration/initialization script.
+::sysinit:/etc/init.d/rcS
+
+::shutdown:/etc/rc.d/rc.reboot
+
+ttyS0::respawn:/etc/rc.d/rc.fastpath

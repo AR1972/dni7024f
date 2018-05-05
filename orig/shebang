@@ -1,0 +1,26 @@
+#!/bin/sh
+
+# The code update proceedure copies the image to flash.
+# This script performs any necessary actions to activate this image 
+# on the switch.
+
+# For any code update changes, this is the only file which needs to 
+# be changed (i.e. neither startup code nor operational code change).
+
+CONFIG_PATH=/mnt/fastpath
+
+
+VERBOSE=1
+
+##############
+# START HERE #
+##############
+
+# Keep the script quiet when invoked by the CLI
+if [ "$1" = "-q" ]
+then
+	VERBOSE=0
+fi
+
+
+exit 0
